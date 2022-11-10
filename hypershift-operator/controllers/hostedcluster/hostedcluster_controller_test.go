@@ -923,8 +923,8 @@ func TestHostedClusterWatchesEverythingItCreates(t *testing.T) {
 			{Service: hyperv1.APIServer, ServicePublishingStrategy: hyperv1.ServicePublishingStrategy{Type: hyperv1.LoadBalancer}},
 			{Service: hyperv1.Konnectivity, ServicePublishingStrategy: hyperv1.ServicePublishingStrategy{Type: hyperv1.Route}},
 			{Service: hyperv1.OAuthServer, ServicePublishingStrategy: hyperv1.ServicePublishingStrategy{Type: hyperv1.Route}},
-			{Service: hyperv1.OIDC, ServicePublishingStrategy: hyperv1.ServicePublishingStrategy{Type: hyperv1.None}},
 			{Service: hyperv1.Ignition, ServicePublishingStrategy: hyperv1.ServicePublishingStrategy{Type: hyperv1.Route}},
+			{Service: hyperv1.OVNSbDb, ServicePublishingStrategy: hyperv1.ServicePublishingStrategy{Type: hyperv1.Route}},
 		}
 		cluster.Spec.PullSecret = corev1.LocalObjectReference{Name: "secret"}
 		cluster.Spec.InfraID = "infra-id"
@@ -1148,10 +1148,11 @@ func TestValidateConfigAndClusterCapabilities(t *testing.T) {
 
 func TestValidateReleaseImage(t *testing.T) {
 	testCases := []struct {
-		name           string
-		other          []crclient.Object
-		hostedCluster  *hyperv1.HostedCluster
-		expectedResult error
+		name                  string
+		other                 []crclient.Object
+		hostedCluster         *hyperv1.HostedCluster
+		expectedResult        error
+		expectedNotFoundError bool
 	}{
 		{
 			name: "no pull secret, error",
@@ -1165,7 +1166,8 @@ func TestValidateReleaseImage(t *testing.T) {
 					},
 				},
 			},
-			expectedResult: errors.New("failed to get pull secret: secrets \"pull-secret\" not found"),
+			expectedResult:        errors.New("failed to get pull secret: secrets \"pull-secret\" not found"),
+			expectedNotFoundError: true,
 		},
 		{
 			name: "invalid pull secret, error",
@@ -1256,13 +1258,13 @@ func TestValidateReleaseImage(t *testing.T) {
 						Name: "pull-secret",
 					},
 					Release: hyperv1.Release{
-						Image: "image-4.10.0",
+						Image: "image-4.11.0",
 					},
 				},
 				Status: hyperv1.HostedClusterStatus{
 					Version: &hyperv1.ClusterVersionStatus{
 						Desired: hyperv1.Release{
-							Image: "image-4.11.0",
+							Image: "image-4.12.0",
 						},
 					},
 				},
@@ -1288,13 +1290,13 @@ func TestValidateReleaseImage(t *testing.T) {
 						Name: "pull-secret",
 					},
 					Release: hyperv1.Release{
-						Image: "image-4.11.0",
+						Image: "image-4.12.0",
 					},
 				},
 				Status: hyperv1.HostedClusterStatus{
 					Version: &hyperv1.ClusterVersionStatus{
 						Desired: hyperv1.Release{
-							Image: "image-4.10.0",
+							Image: "image-4.11.0",
 						},
 					},
 				},
@@ -1320,13 +1322,13 @@ func TestValidateReleaseImage(t *testing.T) {
 						Name: "pull-secret",
 					},
 					Release: hyperv1.Release{
-						Image: "image-4.11.0",
+						Image: "image-4.12.0",
 					},
 				},
 				Status: hyperv1.HostedClusterStatus{
 					Version: &hyperv1.ClusterVersionStatus{
 						Desired: hyperv1.Release{
-							Image: "image-4.10.0",
+							Image: "image-4.11.0",
 						},
 					},
 				},
@@ -1346,13 +1348,13 @@ func TestValidateReleaseImage(t *testing.T) {
 			hostedCluster: &hyperv1.HostedCluster{
 				Spec: hyperv1.HostedClusterSpec{
 					Networking: hyperv1.ClusterNetworking{
-						NetworkType: hyperv1.OpenShiftSDN,
+						NetworkType: hyperv1.OVNKubernetes,
 					},
 					PullSecret: corev1.LocalObjectReference{
 						Name: "pull-secret",
 					},
 					Release: hyperv1.Release{
-						Image: "image-4.10.0",
+						Image: "image-4.11.0",
 					},
 				},
 			},
@@ -1371,19 +1373,19 @@ func TestValidateReleaseImage(t *testing.T) {
 			hostedCluster: &hyperv1.HostedCluster{
 				Spec: hyperv1.HostedClusterSpec{
 					Networking: hyperv1.ClusterNetworking{
-						NetworkType: hyperv1.OpenShiftSDN,
+						NetworkType: hyperv1.OVNKubernetes,
 					},
 					PullSecret: corev1.LocalObjectReference{
 						Name: "pull-secret",
 					},
 					Release: hyperv1.Release{
-						Image: "image-4.10.0",
+						Image: "image-4.11.0",
 					},
 				},
 				Status: hyperv1.HostedClusterStatus{
 					Version: &hyperv1.ClusterVersionStatus{
 						Desired: hyperv1.Release{
-							Image: "image-4.10.0",
+							Image: "image-4.11.0",
 						},
 					},
 				},
@@ -1409,13 +1411,13 @@ func TestValidateReleaseImage(t *testing.T) {
 						Name: "pull-secret",
 					},
 					Release: hyperv1.Release{
-						Image: "image-4.10.0",
+						Image: "image-4.11.0",
 					},
 				},
 				Status: hyperv1.HostedClusterStatus{
 					Version: &hyperv1.ClusterVersionStatus{
 						Desired: hyperv1.Release{
-							Image: "image-4.10.1",
+							Image: "image-4.11.1",
 						},
 					},
 				},
@@ -1447,7 +1449,7 @@ func TestValidateReleaseImage(t *testing.T) {
 				Status: hyperv1.HostedClusterStatus{
 					Version: &hyperv1.ClusterVersionStatus{
 						Desired: hyperv1.Release{
-							Image: "image-4.11.0",
+							Image: "image-4.12.0",
 						},
 					},
 				},
@@ -1465,9 +1467,10 @@ func TestValidateReleaseImage(t *testing.T) {
 						"image-4.7.0":  "4.7.0",
 						"image-4.9.0":  "4.9.0",
 						"image-4.10.0": "4.10.0",
-						"image-4.10.1": "4.10.1",
 						"image-4.11.0": "4.11.0",
+						"image-4.11.1": "4.11.1",
 						"image-4.12.0": "4.12.0",
+						"image-4.13.0": "4.13.0",
 					},
 				},
 			}
@@ -1476,6 +1479,10 @@ func TestValidateReleaseImage(t *testing.T) {
 			actual := r.validateReleaseImage(ctx, tc.hostedCluster)
 			if diff := cmp.Diff(actual, tc.expectedResult, equateErrorMessage); diff != "" {
 				t.Errorf("actual validation result differs from expected: %s", diff)
+			}
+			if tc.expectedNotFoundError {
+				g := NewGomegaWithT(t)
+				g.Expect(errors2.IsNotFound(actual)).To(BeTrue())
 			}
 		})
 	}

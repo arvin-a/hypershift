@@ -15,6 +15,7 @@ import (
 	hyperv1 "github.com/openshift/hypershift/api/v1alpha1"
 	"github.com/openshift/hypershift/hypershift-operator/controllers/hostedcluster"
 	"github.com/openshift/hypershift/hypershift-operator/controllers/manifests"
+	ignserver "github.com/openshift/hypershift/ignition-server/controllers"
 	"github.com/openshift/hypershift/support/releaseinfo"
 	"github.com/openshift/hypershift/support/thirdparty/library-go/pkg/image/dockerv1client"
 	"github.com/openshift/hypershift/support/upsert"
@@ -808,7 +809,7 @@ kind: Config`)},
 	}
 }
 
-func TestGetTunedConfig(t *testing.T) {
+func TestGetTuningConfig(t *testing.T) {
 	tuned1 := `
 apiVersion: tuned.openshift.io/v1
 kind: Tuned
@@ -908,21 +909,20 @@ status: {}
 
 	namespace := "test"
 	testCases := []struct {
-		name                string
-		nodePool            *hyperv1.NodePool
-		tunedConfig         []client.Object
-		expect              string
-		missingTunedConfigs bool
-		error               bool
+		name         string
+		nodePool     *hyperv1.NodePool
+		tuningConfig []client.Object
+		expect       string
+		error        bool
 	}{
 		{
-			name: "gets a single valid TunedConfig",
+			name: "gets a single valid TuningConfig",
 			nodePool: &hyperv1.NodePool{
 				ObjectMeta: metav1.ObjectMeta{
 					Namespace: namespace,
 				},
 				Spec: hyperv1.NodePoolSpec{
-					TunedConfig: []corev1.LocalObjectReference{
+					TuningConfig: []corev1.LocalObjectReference{
 						{
 							Name: "tuned-1",
 						},
@@ -930,14 +930,14 @@ status: {}
 				},
 				Status: hyperv1.NodePoolStatus{},
 			},
-			tunedConfig: []client.Object{
+			tuningConfig: []client.Object{
 				&corev1.ConfigMap{
 					ObjectMeta: metav1.ObjectMeta{
 						Name:      "tuned-1",
 						Namespace: namespace,
 					},
 					Data: map[string]string{
-						tunedConfigKey: tuned1,
+						tuningConfigKey: tuned1,
 					},
 					BinaryData: nil,
 				},
@@ -946,13 +946,13 @@ status: {}
 			error:  false,
 		},
 		{
-			name: "gets two valid TunedConfigs",
+			name: "gets two valid TuningConfigs",
 			nodePool: &hyperv1.NodePool{
 				ObjectMeta: metav1.ObjectMeta{
 					Namespace: namespace,
 				},
 				Spec: hyperv1.NodePoolSpec{
-					TunedConfig: []corev1.LocalObjectReference{
+					TuningConfig: []corev1.LocalObjectReference{
 						{
 							Name: "tuned-1",
 						},
@@ -963,14 +963,14 @@ status: {}
 				},
 				Status: hyperv1.NodePoolStatus{},
 			},
-			tunedConfig: []client.Object{
+			tuningConfig: []client.Object{
 				&corev1.ConfigMap{
 					ObjectMeta: metav1.ObjectMeta{
 						Name:      "tuned-1",
 						Namespace: namespace,
 					},
 					Data: map[string]string{
-						tunedConfigKey: tuned1,
+						tuningConfigKey: tuned1,
 					},
 				},
 				&corev1.ConfigMap{
@@ -979,7 +979,7 @@ status: {}
 						Namespace: namespace,
 					},
 					Data: map[string]string{
-						tunedConfigKey: tuned2,
+						tuningConfigKey: tuned2,
 					},
 				},
 			},
@@ -987,13 +987,13 @@ status: {}
 			error:  false,
 		},
 		{
-			name: "fails if a non existent TunedConfig is referenced",
+			name: "fails if a non existent TuningConfig is referenced",
 			nodePool: &hyperv1.NodePool{
 				ObjectMeta: metav1.ObjectMeta{
 					Namespace: namespace,
 				},
 				Spec: hyperv1.NodePoolSpec{
-					TunedConfig: []corev1.LocalObjectReference{
+					TuningConfig: []corev1.LocalObjectReference{
 						{
 							Name: "does-not-exist",
 						},
@@ -1001,9 +1001,9 @@ status: {}
 				},
 				Status: hyperv1.NodePoolStatus{},
 			},
-			tunedConfig: []client.Object{},
-			expect:      "",
-			error:       true,
+			tuningConfig: []client.Object{},
+			expect:       "",
+			error:        true,
 		},
 	}
 
@@ -1012,10 +1012,10 @@ status: {}
 			g := NewWithT(t)
 
 			r := NodePoolReconciler{
-				Client: fake.NewClientBuilder().WithObjects(tc.tunedConfig...).Build(),
+				Client: fake.NewClientBuilder().WithObjects(tc.tuningConfig...).Build(),
 			}
 
-			got, err := r.getTunedConfig(context.Background(), tc.nodePool)
+			got, err := r.getTuningConfig(context.Background(), tc.nodePool)
 
 			if tc.error {
 				g.Expect(err).To(HaveOccurred())
@@ -1759,6 +1759,100 @@ func TestInPlaceUpgradeMaxUnavailable(t *testing.T) {
 			maxUnavailable, err := getInPlaceMaxUnavailable(tc.nodePool)
 			g.Expect(err).ToNot(HaveOccurred())
 			g.Expect(maxUnavailable).To(Equal(tc.expect))
+		})
+	}
+}
+
+func TestCreateValidGeneratedPayloadCondition(t *testing.T) {
+	testCases := []struct {
+		name                    string
+		tokenSecret             *corev1.Secret
+		tokenSecretDoesNotExist bool
+		expectedCondition       *hyperv1.NodePoolCondition
+	}{
+		{
+			name: "when token secret is not found it should report it in the condition",
+			tokenSecret: &corev1.Secret{
+				TypeMeta: metav1.TypeMeta{},
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test",
+					Namespace: "test",
+				},
+			},
+			tokenSecretDoesNotExist: true,
+			expectedCondition: &hyperv1.NodePoolCondition{
+				Type:               hyperv1.NodePoolValidGeneratedPayloadConditionType,
+				Status:             corev1.ConditionFalse,
+				Severity:           "",
+				LastTransitionTime: metav1.Time{},
+				Reason:             hyperv1.NodePoolNotFoundReason,
+				Message:            "secrets \"test\" not found",
+				ObservedGeneration: 1,
+			},
+		},
+		{
+			name: "when token secret has data it should report it in the condition",
+			tokenSecret: &corev1.Secret{
+				TypeMeta: metav1.TypeMeta{},
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test",
+					Namespace: "test",
+				},
+				Data: map[string][]byte{
+					ignserver.TokenSecretReasonKey:  []byte(hyperv1.NodePoolAsExpectedConditionReason),
+					ignserver.TokenSecretMessageKey: []byte("Payload generated successfully"),
+				},
+			},
+			expectedCondition: &hyperv1.NodePoolCondition{
+				Type:               hyperv1.NodePoolValidGeneratedPayloadConditionType,
+				Status:             corev1.ConditionTrue,
+				Severity:           "",
+				LastTransitionTime: metav1.Time{},
+				Reason:             hyperv1.NodePoolAsExpectedConditionReason,
+				Message:            "Payload generated successfully",
+				ObservedGeneration: 1,
+			},
+		},
+		{
+			name: "when token secret has no data it should report unknown in the condition",
+			tokenSecret: &corev1.Secret{
+				TypeMeta: metav1.TypeMeta{},
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test",
+					Namespace: "test",
+				},
+				Data: map[string][]byte{},
+			},
+			expectedCondition: &hyperv1.NodePoolCondition{
+				Type:               hyperv1.NodePoolValidGeneratedPayloadConditionType,
+				Status:             corev1.ConditionUnknown,
+				Severity:           "",
+				Reason:             "",
+				Message:            "Unable to get status data from token secret",
+				LastTransitionTime: metav1.Time{},
+				ObservedGeneration: 1,
+			},
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			g := NewWithT(t)
+
+			var client client.Client
+			if tc.tokenSecretDoesNotExist {
+				client = fake.NewClientBuilder().WithObjects().Build()
+			} else {
+				client = fake.NewClientBuilder().WithObjects(tc.tokenSecret).Build()
+			}
+
+			r := NodePoolReconciler{
+				Client: client,
+			}
+
+			got, err := r.createValidGeneratedPayloadCondition(context.Background(), tc.tokenSecret, 1)
+			g.Expect(err).ToNot(HaveOccurred())
+			g.Expect(got).To(BeEquivalentTo(tc.expectedCondition))
 		})
 	}
 }

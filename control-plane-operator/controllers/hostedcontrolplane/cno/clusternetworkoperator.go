@@ -2,6 +2,7 @@ package cno
 
 import (
 	"fmt"
+	"github.com/openshift/hypershift/support/proxy"
 
 	"github.com/blang/semver"
 	routev1 "github.com/openshift/api/route/v1"
@@ -49,19 +50,19 @@ type Images struct {
 }
 
 type Params struct {
-	ReleaseVersion              string
-	AvailabilityProberImage     string
-	HostedClusterName           string
-	APIServerAddress            string
-	APIServerPort               int32
-	TokenAudience               string
-	Images                      Images
-	OwnerRef                    config.OwnerRef
-	DeploymentConfig            config.DeploymentConfig
-	IsPrivate                   bool
-	ExposedThroughPrivateRouter bool
-	SbDbPubStrategy             *hyperv1.ServicePublishingStrategy
-	DefaultIngressDomain        string
+	ReleaseVersion          string
+	AvailabilityProberImage string
+	HostedClusterName       string
+	APIServerAddress        string
+	APIServerPort           int32
+	TokenAudience           string
+	Images                  Images
+	OwnerRef                config.OwnerRef
+	DeploymentConfig        config.DeploymentConfig
+	IsPrivate               bool
+	ExposedThroughHCPRouter bool
+	SbDbPubStrategy         *hyperv1.ServicePublishingStrategy
+	DefaultIngressDomain    string
 }
 
 func NewParams(hcp *hyperv1.HostedControlPlane, version string, images map[string]string, setDefaultSecurityContext bool, defaultIngressDomain string) Params {
@@ -90,15 +91,15 @@ func NewParams(hcp *hyperv1.HostedControlPlane, version string, images map[strin
 			CLI:                          images["cli"],
 			Socks5Proxy:                  images["socks5-proxy"],
 		},
-		ReleaseVersion:              version,
-		AvailabilityProberImage:     images[util.AvailabilityProberImageName],
-		OwnerRef:                    config.OwnerRefFrom(hcp),
-		IsPrivate:                   util.IsPrivateHCP(hcp),
-		ExposedThroughPrivateRouter: isOVNSBDBExposedThroughPrivateRouter(hcp),
-		HostedClusterName:           hcp.Name,
-		TokenAudience:               hcp.Spec.IssuerURL,
-		SbDbPubStrategy:             util.ServicePublishingStrategyByTypeForHCP(hcp, hyperv1.OVNSbDb),
-		DefaultIngressDomain:        defaultIngressDomain,
+		ReleaseVersion:          version,
+		AvailabilityProberImage: images[util.AvailabilityProberImageName],
+		OwnerRef:                config.OwnerRefFrom(hcp),
+		IsPrivate:               util.IsPrivateHCP(hcp),
+		ExposedThroughHCPRouter: isOVNSBDBExposedThroughHCPRouter(hcp),
+		HostedClusterName:       hcp.Name,
+		TokenAudience:           hcp.Spec.IssuerURL,
+		SbDbPubStrategy:         util.ServicePublishingStrategyByTypeForHCP(hcp, hyperv1.OVNSbDb),
+		DefaultIngressDomain:    defaultIngressDomain,
 	}
 
 	p.DeploymentConfig.Scheduling.PriorityClass = config.DefaultPriorityClass
@@ -248,8 +249,16 @@ func ReconcileDeployment(dep *appsv1.Deployment, params Params, apiPort *int32) 
 		})
 	}
 
-	if params.ExposedThroughPrivateRouter {
-		cnoEnv = append(cnoEnv, corev1.EnvVar{Name: "OVN_SBDB_ROUTE_LABELS", Value: ingress.HypershiftRouteLabel + "=" + dep.Namespace})
+	if params.ExposedThroughHCPRouter {
+		cnoEnv = append(cnoEnv, corev1.EnvVar{Name: "OVN_SBDB_ROUTE_LABELS", Value: ingress.HCPRouteLabel + "=" + dep.Namespace})
+	}
+
+	var proxyVars []corev1.EnvVar
+	proxy.SetEnvVars(&proxyVars)
+	// CNO requires the proxy values to deploy cloud network config controller in the management cluster,
+	// but it should not use the proxy itself, hence the prefix
+	for _, v := range proxyVars {
+		cnoEnv = append(cnoEnv, corev1.EnvVar{Name: fmt.Sprintf("MGMT_%s", v.Name), Value: v.Value})
 	}
 
 	dep.Spec.Template.Spec.InitContainers = []corev1.Container{
@@ -388,7 +397,7 @@ kubectl --kubeconfig $kc config use-context default`,
 	return nil
 }
 
-func isOVNSBDBExposedThroughPrivateRouter(hcp *hyperv1.HostedControlPlane) bool {
+func isOVNSBDBExposedThroughHCPRouter(hcp *hyperv1.HostedControlPlane) bool {
 	publishingStrategy := util.ServicePublishingStrategyByTypeForHCP(hcp, hyperv1.OVNSbDb)
 	if publishingStrategy == nil || publishingStrategy.Type != hyperv1.Route {
 		return false
@@ -398,5 +407,5 @@ func isOVNSBDBExposedThroughPrivateRouter(hcp *hyperv1.HostedControlPlane) bool 
 		return true
 	}
 
-	return util.HasPublicLoadBalancerForPrivateRouter(hcp) && publishingStrategy.Route.Hostname != ""
+	return util.IsPublicKASWithDNS(hcp) && publishingStrategy.Route.Hostname != ""
 }

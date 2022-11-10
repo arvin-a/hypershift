@@ -43,7 +43,11 @@ nav:
   - how-to/external-dns.md
   - how-to/metrics-sets.md
   - how-to/node-tuning.md
-  - 'AWS':
+  - 'Automated Machine Management':
+    - how-to/automated-machine-management/index.md
+    - how-to/automated-machine-management/scale-to-zero-dataplane.md
+    - how-to/automated-machine-management/nodepool-upgrades.md
+  - "AWS":
     - how-to/aws/create-infra-iam-separately.md
     - how-to/aws/create-aws-hosted-cluster-multiple-zones.md
     - how-to/aws/deploy-aws-private-clusters.md
@@ -59,7 +63,7 @@ nav:
     - how-to/none/create-none-cluster.md
   - 'PowerVS':
     - how-to/powervs/create-cluster-powervs.md
-    - how-to/powervs/create-infra-powervs-separately.md
+    - how-to/powervs/create-infra-separately.md
     - how-to/powervs/prerequisites-and-env-guide.md
 - 'Reference':
   - reference/index.md
