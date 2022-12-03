@@ -21,7 +21,7 @@ import (
 	agentv1 "github.com/openshift/cluster-api-provider-agent/api/v1alpha1"
 	tunedv1 "github.com/openshift/cluster-node-tuning-operator/pkg/apis/tuned/v1"
 	api "github.com/openshift/hypershift/api"
-	hyperv1 "github.com/openshift/hypershift/api/v1alpha1"
+	hyperv1 "github.com/openshift/hypershift/api/v1beta1"
 	"github.com/openshift/hypershift/hypershift-operator/controllers/hostedcluster"
 	"github.com/openshift/hypershift/hypershift-operator/controllers/manifests"
 	"github.com/openshift/hypershift/hypershift-operator/controllers/manifests/ignitionserver"
@@ -83,6 +83,7 @@ const (
 	TokenSecretTokenKey                       = "token"
 	TokenSecretConfigKey                      = "config"
 	TokenSecretAnnotation                     = "hypershift.openshift.io/ignition-config"
+	TokenSecretNodePoolUpgradeType            = "hypershift.openshift.io/node-pool-upgrade-type"
 
 	tuningConfigKey                = "tuning"
 	tuningConfigMapLabel           = "hypershift.openshift.io/tuned-config"
@@ -153,6 +154,7 @@ func (r *NodePoolReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 		if err := r.delete(ctx, nodePool, controlPlaneNamespace); err != nil {
 			return ctrl.Result{}, fmt.Errorf("failed to delete nodepool: %w", err)
 		}
+
 		// Now we can remove the finalizer.
 		if controllerutil.ContainsFinalizer(nodePool, finalizer) {
 			controllerutil.RemoveFinalizer(nodePool, finalizer)
@@ -206,13 +208,6 @@ func (r *NodePoolReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 func (r *NodePoolReconciler) reconcile(ctx context.Context, hcluster *hyperv1.HostedCluster, nodePool *hyperv1.NodePool) (ctrl.Result, error) {
 	log := ctrl.LoggerFrom(ctx)
 
-	// The nodeCount field got renamed, copy the old field for compatibility purposes if the
-	// new one is unset.
-	if nodePool.Spec.Replicas == nil {
-		//lint:ignore SA1019 maintain backward compatibility
-		nodePool.Spec.Replicas = nodePool.Spec.NodeCount
-	}
-
 	// HostedCluster owns NodePools. This should ensure orphan NodePools are garbage collected when cascading deleting.
 	nodePool.OwnerReferences = util.EnsureOwnerRef(nodePool.OwnerReferences, metav1.OwnerReference{
 		APIVersion: hyperv1.GroupVersion.String(),
@@ -243,7 +238,7 @@ func (r *NodePoolReconciler) reconcile(ctx context.Context, hcluster *hyperv1.Ho
 			Type:               hyperv1.NodePoolAutoscalingEnabledConditionType,
 			Status:             corev1.ConditionFalse,
 			Message:            err.Error(),
-			Reason:             hyperv1.NodePoolValidationFailedConditionReason,
+			Reason:             hyperv1.NodePoolValidationFailedReason,
 			ObservedGeneration: nodePool.Generation,
 		})
 		// We don't return the error here as reconciling won't solve the input problem.
@@ -255,7 +250,7 @@ func (r *NodePoolReconciler) reconcile(ctx context.Context, hcluster *hyperv1.Ho
 		setStatusCondition(&nodePool.Status.Conditions, hyperv1.NodePoolCondition{
 			Type:               hyperv1.NodePoolAutoscalingEnabledConditionType,
 			Status:             corev1.ConditionTrue,
-			Reason:             hyperv1.NodePoolAsExpectedConditionReason,
+			Reason:             hyperv1.AsExpectedReason,
 			Message:            fmt.Sprintf("Maximum nodes: %v, Minimum nodes: %v", nodePool.Spec.AutoScaling.Max, nodePool.Spec.AutoScaling.Min),
 			ObservedGeneration: nodePool.Generation,
 		})
@@ -263,7 +258,7 @@ func (r *NodePoolReconciler) reconcile(ctx context.Context, hcluster *hyperv1.Ho
 		setStatusCondition(&nodePool.Status.Conditions, hyperv1.NodePoolCondition{
 			Type:               hyperv1.NodePoolAutoscalingEnabledConditionType,
 			Status:             corev1.ConditionFalse,
-			Reason:             hyperv1.NodePoolAsExpectedConditionReason,
+			Reason:             hyperv1.AsExpectedReason,
 			ObservedGeneration: nodePool.Generation,
 		})
 	}
@@ -274,7 +269,7 @@ func (r *NodePoolReconciler) reconcile(ctx context.Context, hcluster *hyperv1.Ho
 			Type:               hyperv1.NodePoolUpdateManagementEnabledConditionType,
 			Status:             corev1.ConditionFalse,
 			Message:            err.Error(),
-			Reason:             hyperv1.NodePoolValidationFailedConditionReason,
+			Reason:             hyperv1.NodePoolValidationFailedReason,
 			ObservedGeneration: nodePool.Generation,
 		})
 		// We don't return the error here as reconciling won't solve the input problem.
@@ -285,7 +280,7 @@ func (r *NodePoolReconciler) reconcile(ctx context.Context, hcluster *hyperv1.Ho
 	setStatusCondition(&nodePool.Status.Conditions, hyperv1.NodePoolCondition{
 		Type:               hyperv1.NodePoolUpdateManagementEnabledConditionType,
 		Status:             corev1.ConditionTrue,
-		Reason:             hyperv1.NodePoolAsExpectedConditionReason,
+		Reason:             hyperv1.AsExpectedReason,
 		ObservedGeneration: nodePool.Generation,
 	})
 
@@ -342,7 +337,7 @@ func (r *NodePoolReconciler) reconcile(ctx context.Context, hcluster *hyperv1.Ho
 		setStatusCondition(&nodePool.Status.Conditions, hyperv1.NodePoolCondition{
 			Type:               hyperv1.NodePoolValidReleaseImageConditionType,
 			Status:             corev1.ConditionFalse,
-			Reason:             hyperv1.NodePoolValidationFailedConditionReason,
+			Reason:             hyperv1.NodePoolValidationFailedReason,
 			Message:            fmt.Sprintf("Failed to get release image: %v", err.Error()),
 			ObservedGeneration: nodePool.Generation,
 		})
@@ -351,7 +346,7 @@ func (r *NodePoolReconciler) reconcile(ctx context.Context, hcluster *hyperv1.Ho
 	setStatusCondition(&nodePool.Status.Conditions, hyperv1.NodePoolCondition{
 		Type:               hyperv1.NodePoolValidReleaseImageConditionType,
 		Status:             corev1.ConditionTrue,
-		Reason:             hyperv1.NodePoolAsExpectedConditionReason,
+		Reason:             hyperv1.AsExpectedReason,
 		Message:            fmt.Sprintf("Using release image: %s", nodePool.Spec.Release.Image),
 		ObservedGeneration: nodePool.Generation,
 	})
@@ -373,7 +368,7 @@ func (r *NodePoolReconciler) reconcile(ctx context.Context, hcluster *hyperv1.Ho
 				setStatusCondition(&nodePool.Status.Conditions, hyperv1.NodePoolCondition{
 					Type:               hyperv1.NodePoolValidPlatformImageType,
 					Status:             corev1.ConditionFalse,
-					Reason:             hyperv1.NodePoolValidationFailedConditionReason,
+					Reason:             hyperv1.NodePoolValidationFailedReason,
 					Message:            fmt.Sprintf("Couldn't discover an AMI for release image %q: %s", nodePool.Spec.Release.Image, err.Error()),
 					ObservedGeneration: nodePool.Generation,
 				})
@@ -382,7 +377,7 @@ func (r *NodePoolReconciler) reconcile(ctx context.Context, hcluster *hyperv1.Ho
 			setStatusCondition(&nodePool.Status.Conditions, hyperv1.NodePoolCondition{
 				Type:               hyperv1.NodePoolValidPlatformImageType,
 				Status:             corev1.ConditionTrue,
-				Reason:             hyperv1.NodePoolAsExpectedConditionReason,
+				Reason:             hyperv1.AsExpectedReason,
 				Message:            fmt.Sprintf("Bootstrap AMI is %q", ami),
 				ObservedGeneration: nodePool.Generation,
 			})
@@ -399,7 +394,7 @@ func (r *NodePoolReconciler) reconcile(ctx context.Context, hcluster *hyperv1.Ho
 			setStatusCondition(&nodePool.Status.Conditions, hyperv1.NodePoolCondition{
 				Type:               hyperv1.NodePoolValidPlatformImageType,
 				Status:             corev1.ConditionFalse,
-				Reason:             hyperv1.NodePoolValidationFailedConditionReason,
+				Reason:             hyperv1.NodePoolValidationFailedReason,
 				Message:            fmt.Sprintf("Couldn't discover a PowerVS Image for release image %q: %s", nodePool.Spec.Release.Image, err.Error()),
 				ObservedGeneration: nodePool.Generation,
 			})
@@ -409,7 +404,7 @@ func (r *NodePoolReconciler) reconcile(ctx context.Context, hcluster *hyperv1.Ho
 		setStatusCondition(&nodePool.Status.Conditions, hyperv1.NodePoolCondition{
 			Type:               hyperv1.NodePoolValidPlatformImageType,
 			Status:             corev1.ConditionTrue,
-			Reason:             hyperv1.NodePoolAsExpectedConditionReason,
+			Reason:             hyperv1.AsExpectedReason,
 			Message:            fmt.Sprintf("Bootstrap PowerVS Image is %q", powervsBootImage),
 			ObservedGeneration: nodePool.Generation,
 		})
@@ -422,7 +417,7 @@ func (r *NodePoolReconciler) reconcile(ctx context.Context, hcluster *hyperv1.Ho
 			setStatusCondition(&nodePool.Status.Conditions, hyperv1.NodePoolCondition{
 				Type:               hyperv1.NodePoolValidMachineConfigConditionType,
 				Status:             corev1.ConditionFalse,
-				Reason:             hyperv1.NodePoolValidationFailedConditionReason,
+				Reason:             hyperv1.NodePoolValidationFailedReason,
 				Message:            fmt.Sprintf("validation of NodePool KubeVirt platform failed: %s", err.Error()),
 				ObservedGeneration: nodePool.Generation,
 			})
@@ -435,7 +430,7 @@ func (r *NodePoolReconciler) reconcile(ctx context.Context, hcluster *hyperv1.Ho
 			setStatusCondition(&nodePool.Status.Conditions, hyperv1.NodePoolCondition{
 				Type:               hyperv1.NodePoolValidPlatformImageType,
 				Status:             corev1.ConditionFalse,
-				Reason:             hyperv1.NodePoolValidationFailedConditionReason,
+				Reason:             hyperv1.NodePoolValidationFailedReason,
 				Message:            fmt.Sprintf("Couldn't discover a KubeVirt Image for release image %q: %s", nodePool.Spec.Release.Image, err.Error()),
 				ObservedGeneration: nodePool.Generation,
 			})
@@ -444,7 +439,7 @@ func (r *NodePoolReconciler) reconcile(ctx context.Context, hcluster *hyperv1.Ho
 		setStatusCondition(&nodePool.Status.Conditions, hyperv1.NodePoolCondition{
 			Type:               hyperv1.NodePoolValidPlatformImageType,
 			Status:             corev1.ConditionTrue,
-			Reason:             hyperv1.NodePoolAsExpectedConditionReason,
+			Reason:             hyperv1.AsExpectedReason,
 			Message:            fmt.Sprintf("Bootstrap KubeVirt Image is %q", kubevirtBootImage),
 			ObservedGeneration: nodePool.Generation,
 		})
@@ -464,7 +459,7 @@ func (r *NodePoolReconciler) reconcile(ctx context.Context, hcluster *hyperv1.Ho
 		setStatusCondition(&nodePool.Status.Conditions, hyperv1.NodePoolCondition{
 			Type:               hyperv1.NodePoolValidMachineConfigConditionType,
 			Status:             corev1.ConditionFalse,
-			Reason:             hyperv1.NodePoolValidationFailedConditionReason,
+			Reason:             hyperv1.NodePoolValidationFailedReason,
 			Message:            err.Error(),
 			ObservedGeneration: nodePool.Generation,
 		})
@@ -474,7 +469,7 @@ func (r *NodePoolReconciler) reconcile(ctx context.Context, hcluster *hyperv1.Ho
 		setStatusCondition(&nodePool.Status.Conditions, hyperv1.NodePoolCondition{
 			Type:               hyperv1.NodePoolValidMachineConfigConditionType,
 			Status:             corev1.ConditionFalse,
-			Reason:             hyperv1.NodePoolValidationFailedConditionReason,
+			Reason:             hyperv1.NodePoolValidationFailedReason,
 			Message:            "Core ignition config has not been created yet",
 			ObservedGeneration: nodePool.Generation,
 		})
@@ -484,7 +479,7 @@ func (r *NodePoolReconciler) reconcile(ctx context.Context, hcluster *hyperv1.Ho
 	setStatusCondition(&nodePool.Status.Conditions, hyperv1.NodePoolCondition{
 		Type:               hyperv1.NodePoolValidMachineConfigConditionType,
 		Status:             corev1.ConditionTrue,
-		Reason:             hyperv1.NodePoolAsExpectedConditionReason,
+		Reason:             hyperv1.AsExpectedReason,
 		ObservedGeneration: nodePool.Generation,
 	})
 
@@ -495,7 +490,7 @@ func (r *NodePoolReconciler) reconcile(ctx context.Context, hcluster *hyperv1.Ho
 		setStatusCondition(&nodePool.Status.Conditions, hyperv1.NodePoolCondition{
 			Type:               hyperv1.NodePoolUpdatingConfigConditionType,
 			Status:             corev1.ConditionTrue,
-			Reason:             hyperv1.NodePoolAsExpectedConditionReason,
+			Reason:             hyperv1.AsExpectedReason,
 			Message:            fmt.Sprintf("Updating config in progress. Target config: %s", targetConfigHash),
 			ObservedGeneration: nodePool.Generation,
 		})
@@ -513,7 +508,7 @@ func (r *NodePoolReconciler) reconcile(ctx context.Context, hcluster *hyperv1.Ho
 		setStatusCondition(&nodePool.Status.Conditions, hyperv1.NodePoolCondition{
 			Type:               hyperv1.NodePoolUpdatingVersionConditionType,
 			Status:             corev1.ConditionTrue,
-			Reason:             hyperv1.NodePoolAsExpectedConditionReason,
+			Reason:             hyperv1.AsExpectedReason,
 			Message:            fmt.Sprintf("Updating version in progress. Target version: %s", targetVersion),
 			ObservedGeneration: nodePool.Generation,
 		})
@@ -538,7 +533,7 @@ func (r *NodePoolReconciler) reconcile(ctx context.Context, hcluster *hyperv1.Ho
 		setStatusCondition(&nodePool.Status.Conditions, hyperv1.NodePoolCondition{
 			Type:               hyperv1.NodePoolValidTuningConfigConditionType,
 			Status:             corev1.ConditionFalse,
-			Reason:             hyperv1.NodePoolValidationFailedConditionReason,
+			Reason:             hyperv1.NodePoolValidationFailedReason,
 			Message:            err.Error(),
 			ObservedGeneration: nodePool.Generation,
 		})
@@ -548,7 +543,7 @@ func (r *NodePoolReconciler) reconcile(ctx context.Context, hcluster *hyperv1.Ho
 	setStatusCondition(&nodePool.Status.Conditions, hyperv1.NodePoolCondition{
 		Type:               hyperv1.NodePoolValidTuningConfigConditionType,
 		Status:             corev1.ConditionTrue,
-		Reason:             hyperv1.NodePoolAsExpectedConditionReason,
+		Reason:             hyperv1.AsExpectedReason,
 		ObservedGeneration: nodePool.Generation,
 	})
 
@@ -625,16 +620,9 @@ func (r *NodePoolReconciler) reconcile(ctx context.Context, hcluster *hyperv1.Ho
 			}
 		}
 
-		userDataSecret := IgnitionUserDataSecret(controlPlaneNamespace, nodePool.GetName(), nodePool.GetAnnotations()[nodePoolAnnotationCurrentConfigVersion])
-		err = r.Get(ctx, client.ObjectKeyFromObject(userDataSecret), userDataSecret)
-		if err != nil && !apierrors.IsNotFound(err) {
-			return ctrl.Result{}, fmt.Errorf("failed to get user data Secret: %w", err)
-		}
-		if err == nil {
-			if err := r.Delete(ctx, userDataSecret); err != nil && !apierrors.IsNotFound(err) {
-				return ctrl.Result{}, fmt.Errorf("failed to delete user data Secret: %w", err)
-			}
-		}
+		// We keep the old userdata Secret so old Machines during rolled out can be deleted.
+		// Otherwise, deletion fails because of https://github.com/kubernetes-sigs/cluster-api-provider-aws/pull/3805.
+		// TODO (Alberto): enable back deletion when the PR above gets merged.
 	}
 
 	tokenSecret = TokenSecret(controlPlaneNamespace, nodePool.Name, targetConfigVersionHash)
@@ -754,7 +742,7 @@ func (r *NodePoolReconciler) reconcile(ctx context.Context, hcluster *hyperv1.Ho
 		setStatusCondition(&nodePool.Status.Conditions, hyperv1.NodePoolCondition{
 			Type:               hyperv1.NodePoolAutorepairEnabledConditionType,
 			Status:             corev1.ConditionTrue,
-			Reason:             hyperv1.NodePoolAsExpectedConditionReason,
+			Reason:             hyperv1.AsExpectedReason,
 			ObservedGeneration: nodePool.Generation,
 		})
 	} else {
@@ -770,7 +758,7 @@ func (r *NodePoolReconciler) reconcile(ctx context.Context, hcluster *hyperv1.Ho
 		setStatusCondition(&nodePool.Status.Conditions, hyperv1.NodePoolCondition{
 			Type:               hyperv1.NodePoolAutorepairEnabledConditionType,
 			Status:             corev1.ConditionFalse,
-			Reason:             hyperv1.NodePoolAsExpectedConditionReason,
+			Reason:             hyperv1.AsExpectedReason,
 			ObservedGeneration: nodePool.Generation,
 		})
 	}
@@ -814,7 +802,7 @@ func (r NodePoolReconciler) createValidGeneratedPayloadCondition(ctx context.Con
 	}
 
 	var status corev1.ConditionStatus
-	if string(tokenSecret.Data[ignserver.TokenSecretReasonKey]) == hyperv1.NodePoolAsExpectedConditionReason {
+	if string(tokenSecret.Data[ignserver.TokenSecretReasonKey]) == hyperv1.AsExpectedReason {
 		status = corev1.ConditionTrue
 	}
 	condition = &hyperv1.NodePoolCondition{
@@ -941,18 +929,19 @@ func (r *NodePoolReconciler) delete(ctx context.Context, nodePool *hyperv1.NodeP
 		}
 	}
 
-	// Delete any secret belonging to this NodePool i.e token Secret and userdata Secret.
-	secrets, err := r.listSecrets(ctx, nodePool)
-	if err != nil {
-		return fmt.Errorf("failed to list secrets: %w", err)
-	}
-	for k := range secrets {
-		if err := r.Delete(ctx, &secrets[k]); err != nil && !apierrors.IsNotFound(err) {
-			return fmt.Errorf("failed to delete secret: %w", err)
-		}
+	if err := deleteMachineDeployment(ctx, r.Client, md); err != nil {
+		return fmt.Errorf("failed to delete MachineDeployment: %w", err)
 	}
 
-	// Delete any ConfigMap belonging to this NodePool i.e. TuningConfig ConfigMaps.
+	if err := deleteMachineHealthCheck(ctx, r.Client, mhc); err != nil {
+		return fmt.Errorf("failed to delete MachineHealthCheck: %w", err)
+	}
+
+	if err := deleteMachineSet(ctx, r.Client, ms); err != nil {
+		return fmt.Errorf("failed to delete MachineSet: %w", err)
+	}
+
+	// Delete any ConfigMap belonging to this NodePool i.e. TunedConfig ConfigMaps.
 	err = r.DeleteAllOf(ctx, &corev1.ConfigMap{},
 		client.InNamespace(controlPlaneNamespace),
 		client.MatchingLabels{nodePoolAnnotation: nodePool.GetName()},
@@ -961,16 +950,29 @@ func (r *NodePoolReconciler) delete(ctx context.Context, nodePool *hyperv1.NodeP
 		return fmt.Errorf("failed to delete ConfigMaps with nodePool label: %w", err)
 	}
 
-	if err := deleteMachineDeployment(ctx, r.Client, md); err != nil {
-		return fmt.Errorf("failed to delete MachineDeployment: %w", err)
+	// Ensure all machines in NodePool are deleted
+	if err = r.ensureMachineDeletion(nodePool, controlPlaneNamespace); err != nil {
+		return err
 	}
 
-	if err := deleteMachineSet(ctx, r.Client, ms); err != nil {
-		return fmt.Errorf("failed to delete MachineSet: %w", err)
+	// Delete all secrets related to the NodePool
+	if err := r.deleteNodePoolSecrets(ctx, nodePool); err != nil {
+		return fmt.Errorf("failed to delete NodePool secrets: %w", err)
 	}
 
-	if err := deleteMachineHealthCheck(ctx, r.Client, mhc); err != nil {
-		return fmt.Errorf("failed to delete MachineHealthCheck: %w", err)
+	return nil
+}
+
+// deleteNodePoolSecrets deletes any secret belonging to this NodePool (ex. token Secret and userdata Secret)
+func (r *NodePoolReconciler) deleteNodePoolSecrets(ctx context.Context, nodePool *hyperv1.NodePool) error {
+	secrets, err := r.listSecrets(ctx, nodePool)
+	if err != nil {
+		return fmt.Errorf("failed to list secrets: %w", err)
+	}
+	for k := range secrets {
+		if err := r.Delete(ctx, &secrets[k]); err != nil && !apierrors.IsNotFound(err) {
+			return fmt.Errorf("failed to delete secret: %w", err)
+		}
 	}
 	return nil
 }
@@ -1035,6 +1037,7 @@ func reconcileTokenSecret(tokenSecret *corev1.Secret, nodePool *hyperv1.NodePool
 	}
 
 	tokenSecret.Annotations[TokenSecretAnnotation] = "true"
+	tokenSecret.Annotations[TokenSecretNodePoolUpgradeType] = string(nodePool.Spec.Management.UpgradeType)
 	tokenSecret.Annotations[nodePoolAnnotation] = client.ObjectKeyFromObject(nodePool).String()
 	// active token should never be marked as expired.
 	delete(tokenSecret.Annotations, hyperv1.IgnitionServerTokenExpirationTimestampAnnotation)
@@ -1107,7 +1110,6 @@ func (r *NodePoolReconciler) reconcileMachineDeployment(log logr.Logger,
 				nodePoolAnnotation:                        client.ObjectKeyFromObject(nodePool).String(),
 			},
 		},
-
 		Spec: capiv1.MachineSpec{
 			ClusterName: CAPIClusterName,
 			Bootstrap: capiv1.Bootstrap{
@@ -1195,7 +1197,7 @@ func (r *NodePoolReconciler) reconcileMachineDeployment(log logr.Logger,
 		if c.Type == capiv1.ReadyCondition {
 			// this is so api server does not complain
 			// invalid value: \"\": status.conditions.reason in body should be at least 1 chars long"
-			reason := hyperv1.NodePoolAsExpectedConditionReason
+			reason := hyperv1.AsExpectedReason
 			if c.Reason != "" {
 				reason = c.Reason
 			}
@@ -1438,7 +1440,11 @@ func (r *NodePoolReconciler) getTuningConfig(ctx context.Context,
 	}
 
 	for _, config := range configs {
-		manifestRaw := config.Data[tuningConfigKey]
+		manifestRaw, ok := config.Data[tuningConfigKey]
+		if !ok {
+			errors = append(errors, fmt.Errorf("no manifest found in configmap %q with key %q", config.Name, tuningConfigKey))
+			continue
+		}
 		manifest, err := validateTuningConfigManifest([]byte(manifestRaw))
 		if err != nil {
 			errors = append(errors, fmt.Errorf("configmap %q failed validation: %w", config.Name, err))
@@ -2076,4 +2082,28 @@ func (r *NodePoolReconciler) doesCPODecompressAndDecodeConfig(ctx context.Contex
 
 	_, managesDecompressAndDecodeConfig := supportutil.ImageLabels(controlPlaneOperatorImageMetadata)[controlPlaneOperatorManagesDecompressAndDecodeConfig]
 	return managesDecompressAndDecodeConfig, nil
+}
+
+// ensureMachineDeletion ensures all the machines belonging to the NodePool's MachineSet are fully deleted.
+// This function can be deleted once the upstream PR (https://github.com/kubernetes-sigs/cluster-api-provider-aws/pull/3805) is merged and pulled into https://github.com/openshift/cluster-api-provider-aws.
+// This function is necessary to ensure AWSMachines are fully deleted prior to deleting the NodePull secrets being deleted due to a bug introduced by https://github.com/kubernetes-sigs/cluster-api-provider-aws/pull/2271
+// See https://github.com/openshift/hypershift/pull/1826#discussion_r1007349564 for more details.
+func (r *NodePoolReconciler) ensureMachineDeletion(nodePool *hyperv1.NodePool, controlPlaneNamespace string) error {
+	// Get list of CAPI Machines to filter through
+	machines := capiv1.MachineList{}
+	if err := r.List(context.Background(), &machines, &client.ListOptions{Namespace: controlPlaneNamespace}); err != nil {
+		return fmt.Errorf("failed to get list of Machines: %w", err)
+	}
+
+	// Filter out only machines belonging to deleted NodePool
+	var machineSetOwnedMachines []capiv1.Machine
+	for i, machine := range machines.Items {
+		if machine.Annotations[nodePoolAnnotation] == client.ObjectKeyFromObject(nodePool).String() {
+			machineSetOwnedMachines = append(machineSetOwnedMachines, machines.Items[i])
+		}
+	}
+	if len(machineSetOwnedMachines) > 0 {
+		return fmt.Errorf("there are still Machines in the cluster")
+	}
+	return nil
 }

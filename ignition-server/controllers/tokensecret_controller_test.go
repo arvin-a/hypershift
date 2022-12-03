@@ -8,7 +8,7 @@ import (
 	"github.com/go-logr/logr"
 	"github.com/google/uuid"
 	. "github.com/onsi/gomega"
-	hyperv1 "github.com/openshift/hypershift/api/v1alpha1"
+	hyperv1 "github.com/openshift/hypershift/api/v1beta1"
 	"github.com/openshift/hypershift/support/util"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -143,7 +143,8 @@ func TestReconcile(t *testing.T) {
 				g.Expect(freshSecret.Annotations[TokenSecretTokenGenerationTime]).ToNot(BeEmpty())
 
 				// Validate data for conditions
-				g.Expect(freshSecret.Data[TokenSecretReasonKey]).To(BeEquivalentTo(hyperv1.NodePoolAsExpectedConditionReason))
+				g.Expect(freshSecret.Data[TokenSecretPayloadKey]).To(BeEquivalentTo(fakePayload))
+				g.Expect(freshSecret.Data[TokenSecretReasonKey]).To(BeEquivalentTo(hyperv1.AsExpectedReason))
 				g.Expect(freshSecret.Data[TokenSecretMessageKey]).To(BeEquivalentTo("Payload generated successfully"))
 
 				// Delete the secret.
@@ -253,6 +254,45 @@ func TestReconcile(t *testing.T) {
 				value, found = r.PayloadStore.Get(string(newToken))
 				g.Expect(found).To(BeTrue())
 				g.Expect(value.Payload).To(BeEquivalentTo(fakePayload))
+			},
+		},
+		{
+			name: "When the nodepool upgrade strategy is replace, the token secret should not contain the machine payload",
+			secret: &corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test",
+					Namespace: "test",
+					Annotations: map[string]string{
+						TokenSecretAnnotation:          "true",
+						TokenSecretNodePoolUpgradeType: string(hyperv1.UpgradeTypeReplace),
+					},
+					CreationTimestamp: metav1.Now(),
+				},
+				Immutable: nil,
+				Data: map[string][]byte{
+					TokenSecretTokenKey:   []byte(uuid.New().String()),
+					TokenSecretReleaseKey: []byte("release"),
+					TokenSecretConfigKey:  compressedConfigBytes,
+				},
+			},
+			validation: func(t *testing.T, secret client.Object) {
+				ctx := context.Background()
+				r := TokenSecretReconciler{
+					Client:           fake.NewClientBuilder().WithObjects(secret).Build(),
+					IgnitionProvider: &fakeIgnitionProvider{},
+					PayloadStore:     NewPayloadStore(),
+				}
+				g := NewWithT(t)
+				_, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(secret)})
+				g.Expect(err).ToNot(HaveOccurred())
+
+				// Get the secret.
+				freshSecret := &corev1.Secret{}
+				err = r.Client.Get(ctx, client.ObjectKeyFromObject(secret), freshSecret)
+				g.Expect(err).ToNot(HaveOccurred())
+
+				// Validate that the payload was not stored in the token secret
+				g.Expect(freshSecret.Data[TokenSecretPayloadKey]).To(BeEmpty())
 			},
 		},
 	}
