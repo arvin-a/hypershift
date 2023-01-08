@@ -80,6 +80,7 @@ var (
 		"0000_50_cluster-image-registry-operator_07-operator-ibm-cloud-managed.yaml",
 		"0000_50_cluster-image-registry-operator_07-operator-service.yaml",
 		"0000_90_cluster-image-registry-operator_02_operator-servicemonitor.yaml",
+		"0000_50_cluster-storage-operator_10_deployment-ibm-cloud-managed.yaml",
 
 		// TODO: Remove these when cluster profiles annotations are fixed
 		"0000_50_cloud-credential-operator_01-operator-config.yaml",
@@ -253,9 +254,40 @@ func resourcesToRemove() []resourceDesc {
 		{
 			apiVersion: "apps/v1",
 			kind:       "Deployment",
+			name:       "cluster-storage-operator",
+			namespace:  "openshift-cluster-storage-operator",
+		},
+		{
+			apiVersion: "apps/v1",
+			kind:       "Deployment",
 			name:       "csi-snapshot-controller-operator",
 			namespace:  "openshift-cluster-storage-operator",
-		}}
+		},
+		{
+			apiVersion: "apps/v1",
+			kind:       "Deployment",
+			name:       "aws-ebs-csi-driver-operator",
+			namespace:  "openshift-cluster-csi-drivers",
+		},
+		{
+			apiVersion: "apps/v1",
+			kind:       "Deployment",
+			name:       "aws-ebs-csi-driver-controller",
+			namespace:  "openshift-cluster-csi-drivers",
+		},
+		{
+			apiVersion: "apps/v1",
+			kind:       "Deployment",
+			name:       "csi-snapshot-webhook",
+			namespace:  "openshift-cluster-storage-operator",
+		},
+		{
+			apiVersion: "apps/v1",
+			kind:       "Deployment",
+			name:       "csi-snapshot-controller",
+			namespace:  "openshift-cluster-storage-operator",
+		},
+	}
 }
 
 func preparePayloadScript() string {

@@ -180,40 +180,6 @@ func WaitForNReadyNodes(t *testing.T, ctx context.Context, client crclient.Clien
 	return nodes.Items
 }
 
-func WaitForNUnReadyNodes(t *testing.T, ctx context.Context, client crclient.Client, n int32) []corev1.Node {
-	g := NewWithT(t)
-
-	t.Logf("Waiting for Nodes to become unready. Want: %v", n)
-	nodes := &corev1.NodeList{}
-	readyNodeCount := 0
-	err := wait.PollImmediateWithContext(ctx, 5*time.Second, 30*time.Minute, func(ctx context.Context) (done bool, err error) {
-		err = client.List(ctx, nodes)
-		if err != nil {
-			return false, nil
-		}
-		if len(nodes.Items) == 0 {
-			return false, nil
-		}
-		var readyNodes []string
-		for _, node := range nodes.Items {
-			for _, cond := range node.Status.Conditions {
-				if cond.Type == corev1.NodeReady && cond.Status != corev1.ConditionTrue {
-					readyNodes = append(readyNodes, node.Name)
-				}
-			}
-		}
-		if len(readyNodes) != int(n) {
-			readyNodeCount = len(readyNodes)
-			return false, nil
-		}
-		return true, nil
-	})
-	g.Expect(err).NotTo(HaveOccurred(), fmt.Sprintf("failed to ensure guest nodes became ready, ready: (%d/%d): ", readyNodeCount, n))
-
-	t.Logf("Wanted Nodes are unready. Count: %v", n)
-	return nodes.Items
-}
-
 func WaitForNReadyNodesByNodePool(t *testing.T, ctx context.Context, client crclient.Client, n int32, platform hyperv1.PlatformType, nodePoolName string) []corev1.Node {
 	g := NewWithT(t)
 	start := time.Now()
@@ -259,44 +225,6 @@ func WaitForNReadyNodesByNodePool(t *testing.T, ctx context.Context, client crcl
 	return nodesFromNodePool
 }
 
-func WaitForNUnReadyNodesByNodePool(t *testing.T, ctx context.Context, client crclient.Client, n int32, nodePoolName string) []corev1.Node {
-	g := NewWithT(t)
-
-	t.Logf("Waiting for Nodes to become unready by NodePool. NodePool: %s Want: %v", nodePoolName, n)
-	nodes := &corev1.NodeList{}
-	readyNodeCount := 0
-
-	err := wait.PollImmediateWithContext(ctx, 5*time.Second, 30*time.Minute, func(ctx context.Context) (done bool, err error) {
-		err = client.List(ctx, nodes)
-		if err != nil {
-			return false, nil
-		}
-		if len(nodes.Items) == 0 {
-			return false, nil
-		}
-		var readyNodes []string
-		for _, node := range nodes.Items {
-			if node.Labels["hypershift.openshift.io/nodePool"] == nodePoolName {
-				for _, cond := range node.Status.Conditions {
-					if cond.Type == corev1.NodeReady && cond.Status != corev1.ConditionTrue {
-						readyNodes = append(readyNodes, node.Name)
-					}
-				}
-			}
-		}
-
-		if len(readyNodes) != int(n) {
-			readyNodeCount = len(readyNodes)
-			return false, nil
-		}
-		return true, nil
-	})
-	g.Expect(err).NotTo(HaveOccurred(), fmt.Sprintf("failed to ensure guest nodes became ready, ready: (%d/%d): ", readyNodeCount, n))
-
-	t.Logf("Wanted Nodes are unready for NodePool %s. Count: %v", nodePoolName, n)
-	return nodes.Items
-}
-
 func preRolloutPlatformCheck(t *testing.T, ctx context.Context, client crclient.Client, guestClient crclient.Client, hc *hyperv1.HostedCluster) {
 	switch hc.Spec.Platform.Type {
 	case hyperv1.KubevirtPlatform:
@@ -311,11 +239,16 @@ func preRolloutPlatformCheck(t *testing.T, ctx context.Context, client crclient.
 }
 
 func WaitForImageRollout(t *testing.T, ctx context.Context, client crclient.Client, guestClient crclient.Client, hostedCluster *hyperv1.HostedCluster, image string) {
-	g := NewWithT(t)
-	start := time.Now()
-
 	preRolloutPlatformCheck(t, ctx, client, guestClient, hostedCluster)
+	WaitForImageRolloutWithNoPreRolloutPlatformCheck(t, ctx, client, hostedCluster, image)
 
+}
+
+// WaitForImageRolloutWithNoPreRolloutPlatformCheck is like WaitForImageRollout but without calling preRolloutPlatformCheck.
+// This is useful when your test can't access the guest cluster e.g. TestCreateClusterPrivate.
+func WaitForImageRolloutWithNoPreRolloutPlatformCheck(t *testing.T, ctx context.Context, client crclient.Client, hostedCluster *hyperv1.HostedCluster, image string) {
+	start := time.Now()
+	g := NewWithT(t)
 	t.Logf("Waiting for hostedcluster to rollout image. Namespace: %s, name: %s, image: %s", hostedCluster.Namespace, hostedCluster.Name, image)
 	err := wait.PollImmediateWithContext(ctx, 10*time.Second, 30*time.Minute, func(ctx context.Context) (done bool, err error) {
 		latest := hostedCluster.DeepCopy()

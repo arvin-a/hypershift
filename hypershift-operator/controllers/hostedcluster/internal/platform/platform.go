@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/blang/semver"
 	hyperv1 "github.com/openshift/hypershift/api/v1beta1"
 	"github.com/openshift/hypershift/hypershift-operator/controllers/hostedcluster/internal/platform/agent"
 	"github.com/openshift/hypershift/hypershift-operator/controllers/hostedcluster/internal/platform/aws"
@@ -12,6 +13,7 @@ import (
 	"github.com/openshift/hypershift/hypershift-operator/controllers/hostedcluster/internal/platform/kubevirt"
 	"github.com/openshift/hypershift/hypershift-operator/controllers/hostedcluster/internal/platform/none"
 	"github.com/openshift/hypershift/hypershift-operator/controllers/hostedcluster/internal/platform/powervs"
+	"github.com/openshift/hypershift/support/releaseinfo"
 	"github.com/openshift/hypershift/support/upsert"
 	imgUtil "github.com/openshift/hypershift/support/util"
 	appsv1 "k8s.io/api/apps/v1"
@@ -20,7 +22,8 @@ import (
 )
 
 const (
-	AWSCAPIProvider = "aws-cluster-api-controllers"
+	AWSCAPIProvider     = "aws-cluster-api-controllers"
+	PowerVSCAPIProvider = "ibmcloud-cluster-api-controllers"
 )
 
 var _ Platform = aws.AWS{}
@@ -63,22 +66,27 @@ type Platform interface {
 }
 
 // GetPlatform gets and initializes the cloud platform the hosted cluster was created on
-func GetPlatform(hcluster *hyperv1.HostedCluster, utilitiesImage string, pullSecretBytes []byte) (Platform, error) {
+func GetPlatform(ctx context.Context, hcluster *hyperv1.HostedCluster, releaseProvider releaseinfo.Provider, utilitiesImage string, pullSecretBytes []byte) (Platform, error) {
 	var (
 		platform          Platform
 		capiImageProvider string
+		payloadVersion    *semver.Version
 		err               error
 	)
 
 	switch hcluster.Spec.Platform.Type {
 	case hyperv1.AWSPlatform:
 		if pullSecretBytes != nil {
-			capiImageProvider, err = imgUtil.GetPayloadImage(context.TODO(), hcluster, AWSCAPIProvider, pullSecretBytes)
+			capiImageProvider, err = imgUtil.GetPayloadImage(ctx, releaseProvider, hcluster, AWSCAPIProvider, pullSecretBytes)
 			if err != nil {
-				return nil, fmt.Errorf("failed to retrieve capa image: %w", err)
+				return nil, fmt.Errorf("failed to retrieve capi image: %w", err)
+			}
+			payloadVersion, err = imgUtil.GetPayloadVersion(ctx, releaseProvider, hcluster, pullSecretBytes)
+			if err != nil {
+				return nil, fmt.Errorf("failed to fetch payload version: %w", err)
 			}
 		}
-		platform = aws.New(utilitiesImage, capiImageProvider)
+		platform = aws.New(utilitiesImage, capiImageProvider, payloadVersion)
 	case hyperv1.IBMCloudPlatform:
 		platform = &ibmcloud.IBMCloud{}
 	case hyperv1.NonePlatform:
@@ -90,7 +98,13 @@ func GetPlatform(hcluster *hyperv1.HostedCluster, utilitiesImage string, pullSec
 	case hyperv1.AzurePlatform:
 		platform = &azure.Azure{}
 	case hyperv1.PowerVSPlatform:
-		platform = &powervs.PowerVS{}
+		if pullSecretBytes != nil {
+			capiImageProvider, err = imgUtil.GetPayloadImage(ctx, releaseProvider, hcluster, PowerVSCAPIProvider, pullSecretBytes)
+			if err != nil {
+				return nil, fmt.Errorf("failed to retrieve capi image: %w", err)
+			}
+		}
+		platform = powervs.New(capiImageProvider)
 	default:
 		return nil, fmt.Errorf("unsupported platform: %s", hcluster.Spec.Platform.Type)
 	}

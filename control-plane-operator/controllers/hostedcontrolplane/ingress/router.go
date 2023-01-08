@@ -212,6 +212,10 @@ func buildHCPRouterContainerMain(image, namespace, canonicalHostname string, exp
 				Name:  "STATS_PORT",
 				Value: fmt.Sprintf("%d", metricsPort),
 			},
+			{
+				Name:  "ROUTER_CANONICAL_HOSTNAME",
+				Value: canonicalHostname,
+			},
 		}
 
 		c.Image = image
@@ -220,10 +224,6 @@ func buildHCPRouterContainerMain(image, namespace, canonicalHostname string, exp
 		}
 
 		if exposeAPIServerThroughRouter {
-			c.Env = append(c.Env, corev1.EnvVar{
-				Name:  "ROUTER_CANONICAL_HOSTNAME",
-				Value: canonicalHostname,
-			})
 			c.Args = append(c.Args, "--template="+haproxyTemplateMountPath+"/"+routerTemplateConfigMapKey)
 		}
 
@@ -354,13 +354,16 @@ func ReconcileRouterServiceAccount(sa *corev1.ServiceAccount, ownerRef config.Ow
 	return nil
 }
 
-func ReconcileRouterService(svc *corev1.Service, kasPort int32, internal bool) error {
+func ReconcileRouterService(svc *corev1.Service, kasPort int32, internal, crossZoneLoadBalancingEnabled bool) error {
 	if svc.Annotations == nil {
 		svc.Annotations = map[string]string{}
 	}
 	svc.Annotations["service.beta.kubernetes.io/aws-load-balancer-type"] = "nlb"
 	if internal {
 		svc.Annotations["service.beta.kubernetes.io/aws-load-balancer-internal"] = "true"
+	}
+	if crossZoneLoadBalancingEnabled {
+		svc.Annotations["service.beta.kubernetes.io/aws-load-balancer-cross-zone-load-balancing-enabled"] = "true"
 	}
 
 	if svc.Labels == nil {

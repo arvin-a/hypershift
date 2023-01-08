@@ -7,7 +7,9 @@ import (
 	"net/url"
 	"reflect"
 	"strconv"
+	"strings"
 	"sync"
+	"time"
 
 	prometheusoperatorv1 "github.com/prometheus-operator/prometheus-operator/pkg/apis/monitoring/v1"
 	admissionregistrationv1 "k8s.io/api/admissionregistration/v1"
@@ -19,6 +21,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/errors"
+	"k8s.io/apimachinery/pkg/util/sets"
 	apiregistrationv1 "k8s.io/kube-aggregator/pkg/apis/apiregistration/v1"
 	"k8s.io/utils/pointer"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -205,10 +208,7 @@ func (r *reconciler) Reconcile(ctx context.Context, _ ctrl.Request) (ctrl.Result
 	if !hcp.DeletionTimestamp.IsZero() {
 		if shouldCleanupCloudResources(hcp) {
 			log.Info("Cleaning up hosted cluster cloud resources")
-			err := r.destroyCloudResources(ctx, hcp)
-			if err != nil {
-				return ctrl.Result{}, err
-			}
+			return r.destroyCloudResources(ctx, hcp)
 		}
 		return ctrl.Result{}, nil
 	}
@@ -248,6 +248,11 @@ func (r *reconciler) Reconcile(ctx context.Context, _ ctrl.Request) (ctrl.Result
 		return nil
 	}); err != nil {
 		errs = append(errs, fmt.Errorf("failed to reconcile kubernetes.default endpoints: %w", err))
+	}
+
+	log.Info("reconciling install configmap")
+	if err := r.reconcileInstallConfigMap(ctx, releaseImage); err != nil {
+		errs = append(errs, fmt.Errorf("failed to reconcile install configmap: %w", err))
 	}
 
 	log.Info("reconciling guest cluster alert rules")
@@ -1278,59 +1283,93 @@ func (r *reconciler) reconcileAWSIdentityWebhook(ctx context.Context) []error {
 	return errs
 }
 
-func (r *reconciler) destroyCloudResources(ctx context.Context, hcp *hyperv1.HostedControlPlane) error {
+func (r *reconciler) destroyCloudResources(ctx context.Context, hcp *hyperv1.HostedControlPlane) (ctrl.Result, error) {
+	remaining, err := r.ensureCloudResourcesDestroyed(ctx, hcp)
+
+	var status metav1.ConditionStatus
+	var reason, message string
+
+	if err != nil {
+		reason = "ErrorOccurred"
+		status = metav1.ConditionFalse
+		message = fmt.Sprintf("Error: %v", err)
+	} else {
+		if remaining.Len() == 0 {
+			reason = "CloudResourcesDestroyed"
+			status = metav1.ConditionTrue
+			message = "All guest resources destroyed"
+		} else {
+			reason = "RemainingCloudResources"
+			status = metav1.ConditionFalse
+			message = fmt.Sprintf("Remaining resources: %s", strings.Join(remaining.List(), ","))
+		}
+	}
+	resourcesDestroyedCond := &metav1.Condition{
+		Type:    string(hyperv1.CloudResourcesDestroyed),
+		Status:  status,
+		Reason:  reason,
+		Message: message,
+		// Here LastTransitionTime is used to indicate the last time the condition was updated by this
+		// controller. This is used by the CPO as a heartbeat to determine whether resource deletion is
+		// still in progress.
+		LastTransitionTime: metav1.Now(),
+	}
+	meta.SetStatusCondition(&hcp.Status.Conditions, *resourcesDestroyedCond)
+	if err := r.cpClient.Status().Update(ctx, hcp); err != nil {
+		return ctrl.Result{}, fmt.Errorf("failed to set resources destroyed condition: %w", err)
+	}
+
+	if remaining.Len() > 0 {
+		// If we are still waiting for resources to go away, ensure we are requeued in at most 30 secs
+		// so we can at least update the timestamp on the condition.
+		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+	} else {
+		return ctrl.Result{}, nil
+	}
+}
+
+func (r *reconciler) ensureCloudResourcesDestroyed(ctx context.Context, hcp *hyperv1.HostedControlPlane) (sets.String, error) {
 	log := ctrl.LoggerFrom(ctx)
+	remaining := sets.NewString()
 	log.Info("Ensuring resource creation is blocked in cluster")
 	if err := r.ensureResourceCreationIsBlocked(ctx); err != nil {
-		return err
+		return remaining, err
 	}
 	var errs []error
-	allRemoved := true
 	log.Info("Ensuring image registry storage is removed")
 	removed, err := r.ensureImageRegistryStorageRemoved(ctx)
 	if err != nil {
 		errs = append(errs, err)
 	}
-	allRemoved = allRemoved && removed
+	if !removed {
+		remaining.Insert("image-registry")
+	}
 	log.Info("Ensuring ingress controllers are removed")
 	removed, err = r.ensureIngressControllersRemoved(ctx)
 	if err != nil {
 		errs = append(errs, err)
 	}
-	allRemoved = allRemoved && removed
+	if !removed {
+		remaining.Insert("ingress-controllers")
+	}
 	log.Info("Ensuring load balancers are removed")
 	removed, err = r.ensureServiceLoadBalancersRemoved(ctx)
 	if err != nil {
 		errs = append(errs, err)
 	}
-	allRemoved = allRemoved && removed
+	if !removed {
+		remaining.Insert("loadbalancers")
+	}
 	log.Info("Ensuring persistent volumes are removed")
 	removed, err = r.ensurePersistentVolumesRemoved(ctx)
 	if err != nil {
 		errs = append(errs, err)
 	}
-	allRemoved = allRemoved && removed
-
-	if len(errs) > 0 {
-		return errors.NewAggregate(errs)
+	if !removed {
+		remaining.Insert("persistent-volumes")
 	}
 
-	if !allRemoved {
-		return nil
-	}
-
-	resourcesDestroyedCond := &metav1.Condition{
-		Type:   string(hyperv1.CloudResourcesDestroyed),
-		Status: metav1.ConditionTrue,
-		Reason: "CloudResourcesDestroyed",
-	}
-
-	meta.SetStatusCondition(&hcp.Status.Conditions, *resourcesDestroyedCond)
-	if err := r.cpClient.Status().Update(ctx, hcp); err != nil {
-		return fmt.Errorf("failed to set resources destroyed condition: %w", err)
-	}
-
-	return nil
+	return remaining, errors.NewAggregate(errs)
 }
 
 func (r *reconciler) ensureResourceCreationIsBlocked(ctx context.Context) error {
@@ -1478,7 +1517,7 @@ func (r *reconciler) ensureServiceLoadBalancersRemoved(ctx context.Context) (boo
 	found, err := cleanupResources(ctx, r.client, &corev1.ServiceList{}, func(obj client.Object) bool {
 		svc := obj.(*corev1.Service)
 		return svc.Spec.Type == corev1.ServiceTypeLoadBalancer
-	})
+	}, false)
 	if err != nil {
 		return false, fmt.Errorf("failed to remove load balancer services: %w", err)
 	}
@@ -1495,16 +1534,39 @@ func (r *reconciler) ensurePersistentVolumesRemoved(ctx context.Context) (bool, 
 		log.Info("There are no more persistent volumes. Nothing to cleanup.")
 		return true, nil
 	}
-	if _, err := cleanupResources(ctx, r.client, &corev1.PersistentVolumeClaimList{}, nil); err != nil {
+	if _, err := cleanupResources(ctx, r.client, &corev1.PersistentVolumeClaimList{}, nil, false); err != nil {
 		return false, fmt.Errorf("failed to remove persistent volume claims: %w", err)
 	}
 	if _, err := cleanupResources(ctx, r.uncachedClient, &corev1.PodList{}, func(obj client.Object) bool {
 		pod := obj.(*corev1.Pod)
 		return hasAttachedPVC(pod)
-	}); err != nil {
+	}, true); err != nil {
 		return false, fmt.Errorf("failed to remove pods: %w", err)
 	}
 	return false, nil
+}
+
+func (r *reconciler) reconcileInstallConfigMap(ctx context.Context, releaseImage *releaseinfo.ReleaseImage) error {
+	cm := manifests.InstallConfigMap()
+	if _, err := r.CreateOrUpdate(ctx, r.client, cm, func() error {
+		if cm.Data == nil {
+			cm.Data = map[string]string{}
+		}
+		cm.Data["invoker"] = "hypershift"
+		// Only set 'version' if unset. This is meant to preserve the version with
+		// which the cluster was installed and not followup upgrade versions.
+		if _, hasVersion := cm.Data["version"]; !hasVersion {
+			componentVersions, err := releaseImage.ComponentVersions()
+			if err != nil {
+				return fmt.Errorf("failed to look up component versions: %w", err)
+			}
+			cm.Data["version"] = componentVersions["release"]
+		}
+		return nil
+	}); err != nil {
+		return fmt.Errorf("failed to reconcile install configmap: %w", err)
+	}
+	return nil
 }
 
 func hasAttachedPVC(pod *corev1.Pod) bool {
@@ -1524,7 +1586,7 @@ func shouldCleanupCloudResources(hcp *hyperv1.HostedControlPlane) bool {
 // cleanupResources generically deletes resources of a given type using an optional filter
 // function. The result is a boolean indicating whether resources were found that match
 // the filter and an error if one occurred.
-func cleanupResources(ctx context.Context, c client.Client, list client.ObjectList, filter func(client.Object) bool) (bool, error) {
+func cleanupResources(ctx context.Context, c client.Client, list client.ObjectList, filter func(client.Object) bool, force bool) (bool, error) {
 	log := ctrl.LoggerFrom(ctx)
 	if err := c.List(ctx, list); err != nil {
 		return false, fmt.Errorf("cannot list %T: %w", list, err)
@@ -1539,8 +1601,14 @@ func cleanupResources(ctx context.Context, c client.Client, list client.ObjectLi
 			foundResource = true
 			if obj.GetDeletionTimestamp().IsZero() {
 				log.Info("Deleting resource", "type", fmt.Sprintf("%T", obj), "name", client.ObjectKeyFromObject(obj).String())
-				if err := c.Delete(ctx, obj); err != nil {
-					errs = append(errs, err)
+				var deleteErr error
+				if force {
+					deleteErr = c.Delete(ctx, obj, &client.DeleteOptions{GracePeriodSeconds: pointer.Int64Ptr(0)})
+				} else {
+					deleteErr = c.Delete(ctx, obj)
+				}
+				if deleteErr != nil {
+					errs = append(errs, deleteErr)
 				}
 			}
 		}
@@ -1569,12 +1637,30 @@ func (a *genericListAccessor) item(i int) client.Object {
 func (r *reconciler) reconcileStorage(ctx context.Context, hcp *hyperv1.HostedControlPlane, releaseImage *releaseinfo.ReleaseImage) []error {
 	var errs []error
 
-	cr := manifests.CSISnapshotController()
-	if _, err := r.CreateOrUpdate(ctx, r.client, cr, func() error {
-		storage.ReconcileCSISnapshotController(cr)
+	snapshotController := manifests.CSISnapshotController()
+	if _, err := r.CreateOrUpdate(ctx, r.client, snapshotController, func() error {
+		storage.ReconcileCSISnapshotController(snapshotController)
 		return nil
 	}); err != nil {
 		errs = append(errs, fmt.Errorf("failed to reconcile CSISnapshotController : %w", err))
+	}
+
+	storageCR := manifests.Storage()
+	if _, err := r.CreateOrUpdate(ctx, r.client, storageCR, func() error {
+		storage.ReconcileStorage(storageCR)
+		return nil
+	}); err != nil {
+		errs = append(errs, fmt.Errorf("failed to reconcile Storage : %w", err))
+	}
+
+	if hcp.Spec.Platform.Type == hyperv1.AWSPlatform {
+		driver := manifests.ClusterCSIDriver(operatorv1.AWSEBSCSIDriver)
+		if _, err := r.CreateOrUpdate(ctx, r.client, storageCR, func() error {
+			storage.ReconcileClusterCSIDriver(driver)
+			return nil
+		}); err != nil {
+			errs = append(errs, fmt.Errorf("failed to reconcile ClusterCSIDriver %s: %w", driver.Name, err))
+		}
 	}
 	return errs
 }
